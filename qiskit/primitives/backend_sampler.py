@@ -23,10 +23,54 @@ from qiskit.providers.options import Options
 from qiskit.result import QuasiDistribution, Result
 from qiskit.transpiler.passmanager import PassManager
 
-from .backend_estimator import _prepare_counts, _run_circuits
 from .base import BaseSampler, SamplerResult
 from .primitive_job import PrimitiveJob
 from .utils import _circuit_key
+
+
+def _run_circuits(
+    circuits: QuantumCircuit | list[QuantumCircuit],
+    backend: BackendV1 | BackendV2,
+    **run_options,
+) -> tuple[Result, list[dict]]:
+    """Remove metadata of circuits and run the circuits on a backend.
+    Args:
+        circuits: The circuits
+        backend: The backend
+        monitor: Enable job minotor if True
+        **run_options: run_options
+    Returns:
+        The result and the metadata of the circuits
+    """
+    if isinstance(circuits, QuantumCircuit):
+        circuits = [circuits]
+    metadata = []
+    for circ in circuits:
+        metadata.append(circ.metadata)
+        circ.metadata = {}
+    if isinstance(backend, BackendV1):
+        max_circuits = getattr(backend.configuration(), "max_experiments", None)
+    elif isinstance(backend, BackendV2):
+        max_circuits = backend.max_circuits
+    if max_circuits:
+        jobs = [
+            backend.run(circuits[pos : pos + max_circuits], **run_options)
+            for pos in range(0, len(circuits), max_circuits)
+        ]
+        result = [x.result() for x in jobs]
+    else:
+        result = [backend.run(circuits, **run_options).result()]
+    return result, metadata
+
+
+def _prepare_counts(results):
+    counts = []
+    for res in results:
+        count = res.get_counts()
+        if not isinstance(count, list):
+            count = [count]
+        counts.extend(count)
+    return counts
 
 
 class BackendSampler(BaseSampler):
