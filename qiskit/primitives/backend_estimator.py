@@ -1,6 +1,6 @@
 # This code is part of Qiskit.
 #
-# (C) Copyright IBM 2022.
+# (C) Copyright IBM 2022, 2023.
 #
 # This code is licensed under the Apache License, Version 2.0. You may
 # obtain a copy of this license in the LICENSE.txt file in the root directory
@@ -24,13 +24,11 @@ import numpy as np
 from qiskit.circuit import QuantumCircuit
 from qiskit.compiler import transpile
 from qiskit.opflow import PauliSumOp
-from qiskit.providers import Backend, BackendV2, BackendV2Converter
-from qiskit.providers import JobV1 as Job
-from qiskit.providers import Options
+from qiskit.providers import BackendV1, BackendV2, BackendV2Converter, Options
 from qiskit.quantum_info import Pauli, PauliList
 from qiskit.quantum_info.operators.base_operator import BaseOperator
 from qiskit.quantum_info.operators.symplectic.sparse_pauli_op import SparsePauliOp
-from qiskit.result import Counts, Result
+from qiskit.result import Counts
 from qiskit.transpiler import Layout, PassManager
 
 from .base import BaseEstimator, EstimatorResult
@@ -38,9 +36,6 @@ from .primitive_job import PrimitiveJob
 from .utils import init_observable
 
 
-################################################################################
-## ESTIMATOR
-################################################################################
 class BackendEstimator(BaseEstimator):
     """Evaluates expectation value using Pauli rotation gates.
 
@@ -60,7 +55,7 @@ class BackendEstimator(BaseEstimator):
     # pylint: disable=missing-raises-doc
     def __init__(
         self,
-        backend: Backend,
+        backend: BackendV1 | BackendV2,
         *,  # TODO: allow backend as positional after removing deprecations
         abelian_grouping: bool = True,
         skip_transpilation: bool = False,
@@ -77,9 +72,11 @@ class BackendEstimator(BaseEstimator):
             options: Default options.
         """
         # TODO: validation
-        self.backend = backend
-        self.abelian_grouping = abelian_grouping  # TODO: `group_commuting`
-        self.skip_transpilation = skip_transpilation  # TODO: tranpilation level
+        self._backend: BackendV2 = (
+            backend if isinstance(backend, BackendV2) else BackendV2Converter(backend)
+        )
+        self._abelian_grouping = abelian_grouping  # TODO: `group_commuting`
+        self._skip_transpilation = skip_transpilation  # TODO: tranpilation level
         self._bound_pass_manager = bound_pass_manager  # TODO: standardize
         super().__init__(
             circuits=None,
@@ -92,52 +89,20 @@ class BackendEstimator(BaseEstimator):
     def __getnewargs__(self) -> tuple:
         return (self._backend,)
 
-    ################################################################################
-    ## PROPERTIES
-    ################################################################################
     @property
     def backend(self) -> BackendV2:
         """Backend to use for circuit measurements."""
         return self._backend
-
-    @backend.setter
-    def backend(self, backend: Backend) -> None:
-        if not isinstance(backend, Backend):
-            raise TypeError(
-                f"Expected `Backend` type for `backend`, got `{type(backend)}` instead."
-            )
-        # TODO: clear all transpilation caching
-        self._backend: BackendV2 = (
-            backend if isinstance(backend, BackendV2) else BackendV2Converter(backend)
-        )
 
     @property
     def abelian_grouping(self) -> bool:
         """Groups commuting observable components."""
         return self._abelian_grouping
 
-    @abelian_grouping.setter
-    def abelian_grouping(self, abelian_grouping: bool) -> None:
-        if not isinstance(abelian_grouping, bool):
-            raise TypeError(
-                "Expected `bool` type for `abelian_grouping`, "
-                f"got `{type(abelian_grouping)}` instead."
-            )
-        self._abelian_grouping = abelian_grouping
-
     @property
     def skip_transpilation(self) -> bool:
         """If ``True``, transpilation of the input circuits is skipped."""
         return self._skip_transpilation
-
-    @skip_transpilation.setter
-    def skip_transpilation(self, skip_transpilation: bool) -> None:
-        if not isinstance(skip_transpilation, bool):
-            raise TypeError(
-                "Expected `bool` type for `skip_transpilation`, "
-                f"got `{type(skip_transpilation)}` instead."
-            )
-        self._skip_transpilation = skip_transpilation
 
     @property
     def transpile_options(self) -> Options:
@@ -164,9 +129,6 @@ class BackendEstimator(BaseEstimator):
         """Strategy for expectation value reckoning."""
         return _SpectralReckoner()
 
-    ################################################################################
-    ## IMPLEMENTATION
-    ################################################################################
     # TODO: caching
     def _run(
         self,
@@ -262,7 +224,7 @@ class BackendEstimator(BaseEstimator):
 
     def _execute_matrix(
         self, circuits_matrix: Sequence[Sequence[QuantumCircuit]], **run_options
-    ) -> tuple[tuple[Counts]]:
+    ) -> tuple[tuple[Counts, ...], ...]:
         """Execute circuit matrix and return counts in identical (i.e. one-to-one) arrangement.
 
         Each :class:`qiskit.result.Counts` object is annotated with the metadata
@@ -288,11 +250,11 @@ class BackendEstimator(BaseEstimator):
         max_circuits: int = getattr(self.backend, "max_circuits", None) or total_circuits
 
         # Raw results
-        jobs: tuple[Job] = tuple(
+        jobs = [
             self.backend.run(circuits[split : split + max_circuits], **run_options)
             for split in range(0, total_circuits, max_circuits)
-        )
-        raw_results: tuple[Result] = tuple(job.result() for job in jobs)
+        ]
+        raw_results = [job.result() for job in jobs]
 
         # Annotated counts
         job_counts_iter = (
@@ -372,9 +334,6 @@ class BackendEstimator(BaseEstimator):
         ]
         return EstimatorResult(values, metadata)
 
-    ################################################################################
-    ## MEASUREMENT
-    ################################################################################
     # TODO: `QuantumCircuit.measure_observable(observable)` once instructions return self
     def _measure_observable(
         self, circuit: QuantumCircuit, observable: SparsePauliOp
@@ -412,7 +371,7 @@ class BackendEstimator(BaseEstimator):
         share a single common basis in the form of a Pauli operator in order to be measured
         simultaneously (e.g. `ZZ` and `ZI`, or `XI` and `IX`).
         """
-        basis: tuple[Pauli] = self._observable_decomposer.extract_pauli_basis(observable)
+        basis = self._observable_decomposer.extract_pauli_basis(observable)
         if len(basis) != 1:
             raise ValueError("Unable to retrieve a singlet Pauli basis for the given observable.")
         circuit: QuantumCircuit = self._build_pauli_measurement(basis[0])
@@ -515,13 +474,10 @@ class BackendEstimator(BaseEstimator):
             physical_qubit = qargs[0]
             yield qubit_index_map[physical_qubit]
 
-    ################################################################################
-    ## DEPRECATED
-    ################################################################################
     # Note: to allow `backend` as positional argument while deprecated in place
     def __new__(  # pylint: disable=signature-differs
         cls,
-        backend: Backend,  # pylint: disable=unused-argument
+        backend: BackendV1 | BackendV2,  # pylint: disable=unused-argument
         **kwargs,  # pylint: disable=unused-argument
     ):
         self = super().__new__(cls)
@@ -537,13 +493,10 @@ class BackendEstimator(BaseEstimator):
         raise NotImplementedError("This method has been deprecated, use `run` instead.")
 
 
-################################################################################
-## OBSERVABLE DECOMPOSER
-################################################################################
 class _ObservableDecomposer(ABC):
     """Strategy interface for decomposing observables and getting associated measurement bases."""
 
-    def decompose(self, observable: BaseOperator | PauliSumOp) -> tuple[SparsePauliOp]:
+    def decompose(self, observable: BaseOperator | PauliSumOp) -> tuple[SparsePauliOp, ...]:
         """Decomposes a given observable into singly measurable components.
 
         Note that component decomposition is not unique, for instance, commuting components
@@ -563,7 +516,7 @@ class _ObservableDecomposer(ABC):
     def _decompose(
         self,
         observable: SparsePauliOp,
-    ) -> tuple[SparsePauliOp]:
+    ) -> tuple[SparsePauliOp, ...]:
         ...
 
     def extract_pauli_basis(self, observable: BaseOperator | PauliSumOp) -> PauliList:
@@ -597,7 +550,7 @@ class _NaiveDecomposer(_ObservableDecomposer):
     def _decompose(
         self,
         observable: SparsePauliOp,
-    ) -> tuple[SparsePauliOp]:
+    ) -> tuple[SparsePauliOp, ...]:
         return tuple(observable)
 
     def _extract_singlet_basis(self, observable: SparsePauliOp) -> Pauli:
@@ -610,7 +563,7 @@ class _AbelianDecomposer(_ObservableDecomposer):
     def _decompose(
         self,
         observable: SparsePauliOp,
-    ) -> tuple[SparsePauliOp]:
+    ) -> tuple[SparsePauliOp, ...]:
         components = observable.group_commuting(qubit_wise=True)
         return tuple(components)
 
@@ -620,9 +573,6 @@ class _AbelianDecomposer(_ObservableDecomposer):
         return Pauli(zx_data_tuple)
 
 
-################################################################################
-## EXPECTATION VALUE RECKONING
-################################################################################
 class _ExpvalReckoner(ABC):
     """Expectation value reckoning interface.
 
@@ -712,7 +662,7 @@ class _SpectralReckoner(_ExpvalReckoner):
         This is an integer representation of the binary string with a
         1 where there are Paulis, and 0 where there are identities.
         """
-        pauli_mask: np.ndarray[Any, np.dtype[bool]] = pauli.z | pauli.x
+        pauli_mask: np.ndarray[Any, np.dtype[np.bool_]] = pauli.z | pauli.x
         packed_mask: list[int] = np.packbits(pauli_mask, bitorder="little").tolist()
         return reduce(lambda value, element: (value << 8) | element, packed_mask)
 
